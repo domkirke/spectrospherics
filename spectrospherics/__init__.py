@@ -12,6 +12,14 @@ from .spectrospherics import (
     plot_spherical_harmonics,
     plot_euler_noncommutativity,
 )
+from .wigner import (
+    plot_wigner_factorization,
+    plot_small_d,
+    plot_wigner_homomorphism,
+    plot_field_rotation,
+    plot_wigner_manifold,
+    plot_orbit_stabilizer,
+)
 from .lie import (
     plot_tangent_space,
     plot_exponential_map,
