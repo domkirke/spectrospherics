@@ -169,6 +169,99 @@ def _figure(traces, title, width=720, height=520, rng=1.4, eye=(1.5, 1.5, 1.0)):
 
 
 # --------------------------------------------------------------------------- #
+#  a light entry point, for 1_3d_issues.ipynb                                  #
+# --------------------------------------------------------------------------- #
+
+#: a small rigid body : nose, wing, up -- enough to see both pointing and roll
+_BODY = ((np.array([1., 0., 0.]), RED, "nose  +x"),
+         (np.array([0., 1., 0.]), GREEN, "wing  +y"),
+         (np.array([0., 0., 1.]), BLUE, "up  +z"))
+
+
+def plot_angle_noncommutativity():
+    """Two turns, taken in the two possible orders -- and the leftover of a round trip.
+
+    The same x-turn and y-turn are applied in both orders : the object does not end up
+    in the same place. Then the round trip x, y, -x, -y is played : it returns to the
+    starting *instructions* but not to the starting orientation, and what is left over
+    is a turn about the third axis -- the Lie bracket [Jx, Jy] = Jz, made visible.
+
+    The full story (generators, BCH, holonomy) is in *B_so3_lie.ipynb*."""
+
+    eps = pn.widgets.FloatSlider(name="ε : turn about x (°)", start=0, end=180, step=1, value=40)
+    dlt = pn.widgets.FloatSlider(name="δ : turn about y (°)", start=0, end=180, step=1, value=40)
+
+    pane, read = pn.pane.Plotly(), pn.pane.Markdown()
+
+    def _draw(fig, R, col, legend=False):
+        for v, color, name in _BODY:
+            for tr in _arrow([0, 0, 0], .85 * v, 'rgba(140,140,140,.55)', 'start',
+                             width=3, head=.11, showlegend=False):
+                fig.add_trace(tr, row=1, col=col)
+            for tr in _arrow([0, 0, 0], R @ v, color, name, width=7, head=.2,
+                             showlegend=legend):
+                fig.add_trace(tr, row=1, col=col)
+
+    def update(eps_deg, dlt_deg):
+        e, d = np.radians(eps_deg), np.radians(dlt_deg)
+        X, Y = rot(0, e), rot(1, d)
+        first, second = X @ Y, Y @ X                       # the rightmost turn acts first
+        loop = X @ Y @ rot(0, -e) @ rot(1, -d)
+
+        fig = make_subplots(rows=1, cols=3, horizontal_spacing=.02,
+                            specs=[[{"type": "scene"}] * 3],
+                            subplot_titles=("Rx(ε) · Ry(δ)", "Ry(δ) · Rx(ε)",
+                                            "there and back : Rx(ε)Ry(δ)Rx(−ε)Ry(−δ)"))
+        for k, R in enumerate([first, second, loop]):
+            _draw(fig, R, k + 1, legend=(k == 0))
+        ax = dict(range=[-1.15, 1.15], showticklabels=False, title='', showbackground=True,
+                  backgroundcolor='rgb(242,242,242)', gridcolor='white')
+        scene = dict(xaxis=ax, yaxis=ax, zaxis=ax, aspectmode='cube',
+                     camera=dict(eye=dict(x=1.5, y=1.5, z=1.1)))
+        fig.update_layout(width=1040, height=380, uirevision='constant',
+                          margin=dict(t=44, b=0, l=0, r=0),
+                          scene=scene, scene2=scene, scene3=scene,
+                          legend=dict(x=0, y=.05, font=dict(size=11)))
+        pane.object = fig
+
+        gap = np.degrees(np.linalg.norm(rotvec(first @ second.T)))
+        w = rotvec(loop)
+        residual = np.degrees(np.linalg.norm(w))
+        axis = np.round(w / np.linalg.norm(w), 3) if residual > 1e-9 else "—"
+        read.object = (
+            "| | |\n|---|---|\n"
+            f"| the two orders differ by | **{gap:.1f}°** |\n"
+            f"| the round trip leaves | **{residual:.1f}°** about {axis} |\n"
+            f"| ε·δ , the small-angle prediction | {np.degrees(e * d):.1f}° about z |\n\n"
+            "*Both panels on the left were given the **same two turns** in a different order, and "
+            "they disagree. On the right the object is turned and then turned back : the "
+            "instructions cancel exactly, yet the grey starting arrows and the coloured ones no "
+            "longer coincide — a leftover **spin about z**, out of two turns that never mentioned "
+            "z.*\n\n"
+            "*The first two numbers are always equal, and not by luck : the disagreement between "
+            "the two orders **is** the round trip, since (RxRy)(RyRx)⁻¹ = Rx Ry Rx⁻¹ Ry⁻¹. "
+            "Failing to commute and failing to close are one and the same fact.*\n\n"
+            "*That leftover is what the Lie bracket measures. Rotations form a **Lie group** — a "
+            "group whose elements can also be differentiated — and [A,B] = AB − BA is exactly the "
+            "residue of the round trip taken by two infinitesimal turns. Bring both sliders down "
+            "to 10–20° and the measurement meets the ε·δ prediction; open them up and it drifts, "
+            "because the bracket is only the first term. It never vanishes for SO(3) "
+            "([Jx, Jy] = Jz) — which is what a 2D phase never had to worry about : with a single "
+            "axis there is nothing to fail to commute with. Set either slider to 0° (or both to "
+            "180°) and everything collapses back to the commuting case.*")
+
+    pn.bind(update, eps.param.value_throttled, dlt.param.value_throttled, watch=True)
+    update(eps.value, dlt.value)
+
+    return pn.Column(
+        pn.Row(eps, dlt),
+        pane,
+        _formula(r"$$[A,B] = AB - BA \qquad R_x(\epsilon)R_y(\delta)R_x(-\epsilon)"
+                 r"R_y(-\delta) \;\approx\; R_z(\epsilon\delta)$$"),
+        read)
+
+
+# --------------------------------------------------------------------------- #
 #  §1 -- the tangent space :  an infinitesimal rotation is a cross product      #
 # --------------------------------------------------------------------------- #
 

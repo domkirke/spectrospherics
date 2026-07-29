@@ -28,7 +28,13 @@ def plot_circular_fn(*args, order=None):
     phases =  np.array(args[-order:])
     theta, out = from_circular_harmonics(amplitudes, phases)
     fig = go.Figure(go.Scatterpolar(r=out, theta=theta * 360, mode="lines"))
-    fig.update_layout(uirevision='constant')
+    # autosize + a fixed height : the width belongs to the (stretch_width) pane, so
+    # the plot keeps the same place and size on every redraw
+    fig.update_layout(uirevision='constant', autosize=True, height=480,
+        polar = dict(
+            radialaxis = dict(range=[0, 5]),
+            angularaxis = dict(showticklabels=False, ticks='')
+        ))
     return fig
 
 
@@ -58,7 +64,7 @@ def _render_circular(params, structural):
 
 CIRCULAR_2D = DecompositionSpec(
     name="Circular harmonics (2D)",
-    structural={"order": (1, 6, 3)},
+    structural={"order": (1, 7, 3)},
     build_params=_build_circular_params,
     render=_render_circular,
 )

@@ -26,7 +26,8 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from scipy.linalg import expm
 
-from .lie import J, rot, rotvec, bracket, wigner_D, BLUE, RED, GREY, _formula
+from .lie import (J, rot, rotvec, bracket, wigner_D, hat,
+                  BLUE, RED, GREEN, AMBER, PURPLE, GREY, _formula)
 from .utils import spherical_harmonic
 from .spectrospherics import EULER_FIELD_PRESETS, _coeffs_from_dict
 
@@ -150,12 +151,68 @@ _GRID_DIRS = np.stack([np.sin(_GRID_ZE) * np.cos(_GRID_AZ),
                        np.cos(_GRID_ZE)], -1)
 
 
-def _field_surface(f, scale, name):
-    r = np.abs(f) / scale
-    return go.Surface(x=r * _GRID_DIRS[..., 0], y=r * _GRID_DIRS[..., 1],
-                      z=r * _GRID_DIRS[..., 2], surfacecolor=np.sign(f),
-                      cmin=-1, cmax=1, showscale=False, name=name,
-                      colorscale=[[0, BLUE], [1, RED]])
+def _field_surface(f, scale, name, dirs=None, color=None, opacity=1.0, grow=1.0):
+    """The balloon r = |f|, blue where f < 0 and red where f > 0.
+
+    ``color`` paints it in one flat colour instead, which is what a field drawn *on
+    top of* another one needs -- with ``grow`` a few percent above 1 so the two do
+    not z-fight when they happen to be the same surface."""
+    dirs = _GRID_DIRS if dirs is None else dirs
+    r = grow * np.abs(f) / scale
+    paint = (dict(surfacecolor=np.sign(f), colorscale=[[0, BLUE], [1, RED]], cmin=-1, cmax=1)
+             if color is None else
+             dict(surfacecolor=np.zeros_like(r), colorscale=[[0, color], [1, color]],
+                  cmin=0, cmax=1))
+    return go.Surface(x=r * dirs[..., 0], y=r * dirs[..., 1], z=r * dirs[..., 2],
+                      showscale=False, name=name, opacity=opacity, **paint)
+
+
+def closest_rotation(l, a, b, n_starts=8, iters=30):
+    """``min over R of ||D(R)a - b||``, and the ``D`` that achieves it.
+
+    Two stages, and both are needed. A cloud of ~1200 rotations samples the
+    3-dimensional group only every ~17 degrees, which on its own leaves a residual as
+    large as the effect being measured. Refining from it with Gauss-Newton -- using
+    d/dw_k D(R)a = G_k D(R)a -- converges quadratically, but D^l oscillates l times
+    faster than that sampling, so a single start falls into a local minimum for
+    l >= 3. Hence the refinement is run from the best ``n_starts`` candidates and the
+    best result kept.
+
+    Two details the naive version gets wrong, both on *symmetric* multiplets, which
+    are exactly the interesting ones. The Jacobian is rank-deficient there -- a
+    stabilizer direction moves nothing -- so the least-squares step must truncate its
+    null direction (``rcond``) or it comes back with a step of 1e8 ; and near a
+    stationary point the residual is second-order, so the step has to be capped and
+    backtracked or it never lands. Without the two, the search misses even the
+    identity : ``a`` itself is reported 0.028 away from ``a``."""
+    cloud = rotation_cloud(l)
+    coarse = np.linalg.norm(cloud @ a - b, axis=1)
+    G = real_generators(l)
+    best_val, best_D = np.inf, cloud[int(np.argmin(coarse))]
+    for start in np.argsort(coarse)[:n_starts]:
+        D = cloud[start]
+        for _ in range(iters):
+            res = b - D @ a
+            cur = np.linalg.norm(res)
+            Jac = np.stack([g @ (D @ a) for g in G], axis=-1)       # (2l+1, 3)
+            step, *_ = np.linalg.lstsq(Jac, res, rcond=1e-8)
+            norm = np.linalg.norm(step)
+            if not np.all(np.isfinite(step)) or norm < 1e-13:
+                break
+            if norm > .5:                       # a linearization is only local
+                step *= .5 / norm
+            for _ in range(12):                 # backtrack until it actually improves
+                D_try = expm(sum(s * g for s, g in zip(step, G))) @ D
+                if np.linalg.norm(b - D_try @ a) < cur:
+                    D = D_try
+                    break
+                step = step * .5
+            else:
+                break
+        val = float(np.linalg.norm(D @ a - b))
+        if val < best_val:
+            best_val, best_D = val, D
+    return best_val, best_D
 
 
 def _matrix_heatmap(M, m_index, zmin=None, zmax=None, colorscale='RdBu', reverse=True):
@@ -595,9 +652,40 @@ def plot_wigner_manifold():
 _MULTIPLET_PRESETS = {
     "zonal  Y_ℓ⁰  (axisymmetric)": "zonal",
     "sectoral  Y_ℓ^ℓ": "sectoral",
-    "generic (random)": "generic",
     "two orders  Y_ℓ⁰ + Y_ℓ^ℓ": "mixed",
+    "generic (random)": "generic",
 }
+
+#: The hover ghost is re-sent over the websocket on every mouse move, so this panel
+#: draws its spheres on a quarter of the usual grid : 64 x 33 is still smooth and
+#: keeps one update around 25 kB instead of 110 kB.
+_ORB_AZ, _ORB_ZE = np.meshgrid(np.linspace(-np.pi, np.pi, 64),
+                               np.linspace(_POLE_EPS, np.pi - _POLE_EPS, 33), indexing='ij')
+_ORB_DIRS = np.stack([np.sin(_ORB_ZE) * np.cos(_ORB_AZ),
+                      np.sin(_ORB_ZE) * np.sin(_ORB_AZ),
+                      np.cos(_ORB_ZE)], -1)
+
+#: the three one-parameter subgroups, drawn as loops through the multiplet
+_LOOP_AXES = [("x", RED), ("y", GREEN), ("z", BLUE)]
+
+_REACH_TOL = 5e-3       # below this, a rotation really does land on the target
+
+_SUB = "₀₁₂₃₄₅₆₇₈₉"
+_SUPD = "⁰¹²³⁴⁵⁶⁷⁸⁹"
+
+
+def _SUP(m):
+    """``m`` as a superscript, for labelling Y_l^m inside a plot."""
+    return ("⁻" if m < 0 else "") + "".join(_SUPD[int(c)] for c in str(abs(m)))
+
+
+#: the sphere on the left : plain axes, the shape is the whole message
+_ORB_AX = dict(showticklabels=False, title='', backgroundcolor='rgb(242,242,242)',
+               gridcolor='white', showbackground=True)
+
+#: the orbit on the right : here the axes are the point, so they keep their labels
+_ORB_AX2 = dict(backgroundcolor='rgb(246,246,246)', gridcolor='white', showbackground=True,
+                zerolinecolor='rgb(200,200,200)', tickfont=dict(size=9))
 
 
 def _preset_vector(l, kind):
@@ -613,91 +701,346 @@ def _preset_vector(l, kind):
     return a / np.linalg.norm(a)
 
 
-def plot_orbit_stabilizer():
-    """Orbits, stabilizers and invariants, measured rather than asserted.
+def _subgroup_loop(l, a, k, n=145):
+    """``{ D(exp(theta e_k)) a }`` for a full turn about the axis ``e_k``.
 
-    The orbit's dimension is the rank of the three tangent directions ``G_a . a`` ;
-    the stabilizer's dimension is what is left of the three rotations, and the number
-    of independent invariants is the codimension. The zonal preset is the interesting
-    one : it is axisymmetric, so one whole rotation does nothing to it."""
+    The matrices are chained from a single small step instead of exponentiating each
+    angle : one ``expm`` and n matrix products, orthogonal to ~1e-14 all the way
+    round, which is far below anything visible in a plot."""
+    G = real_generators(l)[k]
+    step = expm((2 * np.pi / (n - 1)) * G)
+    out, D = [a.copy()], np.eye(len(a))
+    for _ in range(n - 1):
+        D = step @ D
+        out.append(D @ a)
+    return np.array(out)
+
+
+def _orbit_net(l, a, n_meridian=12, n_beta=25, n_parallel=5, n_alpha=49):
+    """The orbit as a lat-long net rather than as dust.
+
+    Every point is ``D(R(alpha, beta)) a``, the multiplet aimed at the direction
+    ``R z`` : the meridians sweep the tilt, the parallels sweep the yaw. Scattered
+    dots say nothing about the shape of a set ; the same points joined along the two
+    parameters they came from show it for what it is -- a closed surface. For an
+    axisymmetric multiplet that surface *is* the whole orbit, since the third angle
+    does nothing.
+
+    Returned as a list of ``(points, labels)`` curves, one per line to draw."""
+    _, Gy, Gz = real_generators(l)
+    betas = np.linspace(0, np.pi, n_beta)
+    ring = np.linspace(0, 2 * np.pi, n_alpha)
+    Eb = [expm(b * Gy) for b in betas]
+    Er = [expm(t * Gz) for t in ring]
+
+    curves = []
+    for alpha in np.linspace(0, 2 * np.pi, n_meridian, endpoint=False):
+        Ea = expm(alpha * Gz)
+        curves.append((np.array([Ea @ E @ a for E in Eb]),
+                       [(np.degrees(alpha), np.degrees(b)) for b in betas]))
+    for beta in np.linspace(0, np.pi, n_parallel + 2)[1:-1]:
+        Ebeta = expm(beta * Gy)
+        curves.append((np.array([E @ Ebeta @ a for E in Er]),
+                       [(np.degrees(t), np.degrees(beta)) for t in ring]))
+    return curves
+
+
+
+
+def _euler_D(l, alpha, beta, gamma):
+    """``D`` of the ZYZ rotation R(alpha, beta, gamma), from the generators."""
+    Gx, Gy, Gz = real_generators(l)
+    return expm(alpha * Gz) @ expm(beta * Gy) @ expm(gamma * Gz)
+
+
+def _euler_route(l, a, alpha, beta, gamma, n=25):
+    """The path from ``a`` to ``D(alpha, beta, gamma) a``, one Euler angle at a time.
+
+    Read right to left, as the matrices act : first the spin gamma, then the tilt
+    beta, then the yaw alpha. Drawn as a route rather than a jump because that is
+    what makes the stabilizer visible -- on an axisymmetric multiplet the first leg
+    has no length at all, however far gamma is pushed."""
+    _, Gy, Gz = real_generators(l)
+    Dg, Db = expm(gamma * Gz), expm(beta * Gy)
+    legs = ((Gz, gamma, np.eye(2 * l + 1)),      # the spin, acting first
+            (Gy, beta, Dg),                      # then the tilt, on top of it
+            (Gz, alpha, Db @ Dg))                # then the yaw, on top of both
+    # the new angle multiplies on the *left* of what is already applied, or the legs
+    # do not join up and the last one does not land on D(alpha, beta, gamma) a
+    return [np.array([expm(t * G) @ done @ a for t in np.linspace(0, ang, n)])
+            if abs(ang) > 1e-12 else np.empty((0, 2 * l + 1))
+            for G, ang, done in legs]
+
+
+def plot_orbit_stabilizer():
+    """Orbits, stabilizers and invariants, measured rather than asserted -- and
+    navigable, because a cloud of dots on unlabelled axes explains nothing.
+
+    The right-hand plot is the set of *all* rotations of one multiplet, drawn in the
+    3 principal directions of that set (the axes say how much of the set each one
+    carries -- at l = 1 they carry all of it, higher up they do not). The orbit is
+    drawn as the net it is : every point is the multiplet aimed at one direction,
+    meridians sweeping the tilt and parallels the yaw. Three coloured loops give it a
+    skeleton -- turning about x, about y, about z -- and **a loop that shrinks to a
+    single dot is the stabilizer**, the whole circle of rotations that all return the
+    identical coefficient vector.
+
+    The three Euler sliders walk one rotation across that net. The amber route shows
+    how it got there, one angle at a time, and the left-hand sphere draws the result
+    solid inside the ghost of the multiplet it started from : where the solid shape
+    fills the ghost exactly, the rotation did nothing.
+
+    The green diamonds are single harmonics Y_l^m that some rotation of this
+    multiplet *is*. Only those are drawn on the orbit -- a harmonic no rotation
+    reaches is not a point of the orbit and has no business being pictured on it.
+    Every harmonic's distance to the orbit is in the bar chart instead, measured with
+    ``closest_rotation`` : zero means it lies on the orbit, anything else is a shape
+    that no aiming of this multiplet will ever produce."""
 
     l = pn.widgets.IntSlider(name="degree ℓ", start=1, end=5, value=2)
     preset = pn.widgets.Select(name="multiplet", options=list(_MULTIPLET_PRESETS))
-    tilt = pn.widgets.FloatSlider(name="tilt the multiplet away from the preset",
-                                  start=0, end=1, step=.01, value=0.)
+    sym = pn.widgets.FloatSlider(name="break the symmetry (mix in a random multiplet)",
+                                 start=0, end=1, step=.01, value=0.)
+    alpha = pn.widgets.FloatSlider(name="yaw α about z (°)", start=0, end=360, step=1, value=0)
+    beta = pn.widgets.FloatSlider(name="tilt β about y (°)", start=0, end=180, step=1, value=0)
+    gamma = pn.widgets.FloatSlider(name="spin γ about z, first (°)", start=0, end=360,
+                                   step=1, value=0)
 
-    pane, read = pn.pane.Plotly(), pn.pane.Markdown()
+    pane_field = pn.pane.Plotly(config={'displayModeBar': False})
+    pane_orbit = pn.pane.Plotly()
+    pane_reach = pn.pane.Plotly(config={'displayModeBar': False})
+    where = pn.pane.Markdown()
+    read = pn.pane.Markdown()
 
-    def update(l, preset, tilt):
+    #: whatever survives between a structural rebuild and a slider move
+    st = {}
+
+    def _rebuild(l, preset, sym):
+        """Everything that depends on the multiplet but not on the three angles."""
         a = _preset_vector(l, _MULTIPLET_PRESETS[preset])
-        if tilt > 0:
-            a = a + tilt * np.random.default_rng(11).normal(size=2 * l + 1)
+        if sym > 0:
+            a = a + sym * np.random.default_rng(11).normal(size=2 * l + 1)
             a /= np.linalg.norm(a)
+        d = 2 * l + 1
 
-        G = real_generators(l)
-        T = np.stack([g @ a for g in G], -1)                 # the three tangent directions
+        T = np.stack([g @ a for g in real_generators(l)], -1)   # the tangent directions
         sv = np.linalg.svd(T, compute_uv=False)
         orbit_dim = int(np.sum(sv > 1e-5 * max(sv[0], 1e-12)))
-        stab_dim = 3 - orbit_dim
-        n_inv = (2 * l + 1) - orbit_dim
+        n_inv = d - orbit_dim
 
-        # the orbit itself, projected on its own three leading directions
         cloud = rotation_cloud(l) @ a
-        C = cloud - cloud.mean(0)
-        S, Vt = np.linalg.svd(C, full_matrices=False)[1:]
-        P = C @ Vt[:3].T
+        centre = cloud.mean(0)
+        S, Vt = np.linalg.svd(cloud - centre, full_matrices=False)[1:]
+        axes3, var = Vt[:3], S ** 2 / max((S ** 2).sum(), 1e-30)
+        project = lambda V: (np.atleast_2d(V) - centre) @ axes3.T
 
-        f = sh_matrix(l, _GRID_DIRS) @ a
+        # ---- the orbit, as a net rather than as dust ------------------------
+        # When it is a surface the net *is* the orbit ; when it is a volume the net
+        # is only the zero-spin slice through it, and a dense one just tangles.
+        net = (_orbit_net(l, a) if orbit_dim < 3 else
+               _orbit_net(l, a, n_meridian=6, n_parallel=3))
+        traces = []
+        if orbit_dim == 3:
+            P = project(cloud)
+            traces.append(go.Scatter3d(
+                x=P[:, 0], y=P[:, 1], z=P[:, 2], mode='markers',
+                marker=dict(size=1.5, color=GREY, opacity=.18),
+                name='rotations off the net (the spin γ)', hoverinfo='skip'))
+        for j, (pts, _lab) in enumerate(net):
+            P = project(pts)
+            traces.append(go.Scatter3d(
+                x=P[:, 0], y=P[:, 1], z=P[:, 2], mode='lines',
+                line=dict(color=GREY, width=1.5), opacity=.65 if orbit_dim < 3 else .35,
+                hoverinfo='skip', legendgroup='net', showlegend=(j == 0),
+                name='the orbit : every aiming of the multiplet' if orbit_dim < 3 else
+                     'aimings with no spin (one slice of the orbit)'))
+        for k, (nm, color) in enumerate(_LOOP_AXES):
+            loop = _subgroup_loop(l, a, k)
+            collapsed = float(np.abs(loop - a).max()) < _REACH_TOL
+            P = project(loop)
+            traces.append(go.Scatter3d(
+                x=P[:, 0], y=P[:, 1], z=P[:, 2],
+                mode='markers' if collapsed else 'lines',
+                line=dict(color=color, width=7),
+                marker=dict(size=15, color=color, symbol='circle-open', line=dict(width=3)),
+                hoverinfo='skip',
+                name=f"about {nm}" + ("  ⟵ COLLAPSED to a point" if collapsed else "")))
 
-        fig = make_subplots(rows=1, cols=2, specs=[[{"type": "scene"}, {"type": "scene"}]],
-                            subplot_titles=(f"the field of this multiplet (ℓ = {l})",
-                                            f"its orbit, projected on its 3 leading directions"))
-        fig.add_trace(_field_surface(f, max(np.abs(f).max(), 1e-9), 'field'), row=1, col=1)
-        fig.add_trace(go.Scatter3d(x=P[:, 0], y=P[:, 1], z=P[:, 2], mode='markers',
-                                   marker=dict(size=2, color=P[:, 2], colorscale='Viridis',
-                                               showscale=False), name='orbit'), row=1, col=2)
-        ax = dict(showticklabels=False, title='', backgroundcolor='rgb(240,240,240)',
-                  gridcolor='white', showbackground=True)
-        fig.update_layout(width=1080, height=440, uirevision='constant',
-                          margin=dict(t=48, b=0, l=0, r=0),
-                          scene=dict(xaxis=dict(range=[-1.05, 1.05], **ax),
-                                     yaxis=dict(range=[-1.05, 1.05], **ax),
-                                     zaxis=dict(range=[-1.05, 1.05], **ax), aspectmode='cube',
-                                     camera=dict(eye=dict(x=1.6, y=1.6, z=1.0))),
-                          scene2=dict(xaxis=ax, yaxis=ax, zaxis=ax, aspectmode='cube'))
-        pane.object = fig
+        # ---- which single harmonics this multiplet can actually be turned into
+        reach = np.array([closest_rotation(l, a, e, n_starts=6, iters=25)[0]
+                          for e in np.eye(d)])
+        hit = [m for m, r in zip(range(-l, l + 1), reach) if r < _REACH_TOL]
+        if hit:
+            P = project(np.eye(d)[[m + l for m in hit]])
+            traces.append(go.Scatter3d(
+                x=P[:, 0], y=P[:, 1], z=P[:, 2], mode='markers+text',
+                marker=dict(size=8, symbol='diamond', color=GREEN),
+                text=[f"Y{_SUP(m)}" for m in hit], textposition='top center',
+                textfont=dict(size=10), hoverinfo='skip',
+                name='single harmonics this multiplet can be turned into'))
+        P0 = project(a)
+        traces.append(go.Scatter3d(x=P0[:, 0], y=P0[:, 1], z=P0[:, 2], mode='markers',
+                                   marker=dict(size=7, color='black'), hoverinfo='skip',
+                                   name='a itself (all three angles at 0)'))
 
-        axisymmetric = (l == 1) or (_MULTIPLET_PRESETS[preset] == "zonal" and tilt == 0)
-        expected = 2 if axisymmetric else 3
+        st.update(a=a, l=l, d=d, project=project, orbit_dim=orbit_dim,
+                  Y=sh_matrix(l, _ORB_DIRS), traces=traces, var=var,
+                  title=f"every rotation of this multiplet (ℓ = {l})")
+
+        # ---- the honest answer about the harmonics, as distances -------------
+        names = [f"Y{_SUP(m)}" for m in range(-l, l + 1)]
+        bars = go.Figure(go.Bar(
+            x=names, y=reach, marker_color=PURPLE,
+            hovertemplate="%{x} : %{y:.3f} away<extra></extra>"))
+        # a bar of height zero draws nothing, and 'nothing' is the one answer here
+        # that must not be silent : mark the reachable ones explicitly.
+        on_orbit = [n for n, r in zip(names, reach) if r < _REACH_TOL]
+        if on_orbit:
+            bars.add_trace(go.Scatter(
+                x=on_orbit, y=[0] * len(on_orbit), mode='markers+text',
+                marker=dict(size=11, color=GREEN, symbol='diamond'),
+                text=['on the orbit'] * len(on_orbit), textposition='top center',
+                textfont=dict(size=9, color=GREEN), cliponaxis=False,
+                hovertemplate="%{x} : a rotation of a lands exactly here<extra></extra>"))
+        bars.update_layout(
+            width=520, height=210, uirevision='constant',
+            title=dict(text="how far each single harmonic is from this orbit<br>"
+                            "<sub>0 = some rotation of the multiplet <b>is</b> that harmonic ;"
+                            " anything else = it never will be</sub>",
+                       x=.5, font=dict(size=12)),
+            margin=dict(t=58, b=30, l=50, r=10), showlegend=False,
+            yaxis=dict(title="‖D(R)a − Yℓᵐ‖, best over all R", range=[0, max(reach.max(), .1) * 1.15]))
+        pane_reach.object = bars
+
+        axisymmetric = orbit_dim < 3
+        expected = 2 if (l == 1 or (_MULTIPLET_PRESETS[preset] == "zonal" and sym == 0)) else 3
         read.object = (
             "| quantity | measured | theory |\n|---|---|---|\n"
-            f"| dim ℋ_ℓ = 2ℓ+1 | {2*l+1} | {2*l+1} |\n"
+            f"| dim ℋ_ℓ = 2ℓ+1 | {d} | {d} |\n"
             f"| singular values of (Gₓa, G_ya, G_za) | {np.round(sv, 5)} | — |\n"
             f"| **dim orbit** | **{orbit_dim}** | {expected} |\n"
-            f"| **dim stabilizer** = 3 − dim orbit | **{stab_dim}** | "
+            f"| **dim stabilizer** = 3 − dim orbit | **{3 - orbit_dim}** | "
             f"{3 - expected} {'(SO(2) : an axis of symmetry)' if axisymmetric else '(finite)'} |\n"
             f"| **n_invariants** = (2ℓ+1) − dim orbit | **{n_inv}** | "
-            f"{2*l + 1 - expected}"
+            f"{d - expected}"
             f"{'  (generic : 2ℓ−2)' if not axisymmetric and l >= 2 else '  (a symmetric point : more invariants than the generic 2ℓ−2)' if l >= 2 else ''} |\n"
             f"| ‖a‖ along the orbit (an invariant) | "
             f"{np.linalg.norm(cloud, axis=1).min():.8f} … "
             f"{np.linalg.norm(cloud, axis=1).max():.8f} | 1 |\n"
-            f"| linear span of the orbit cloud | {int(np.sum(S > 1e-6 * S[0]))} of {2*l+1} "
-            f"directions | — |\n\n"
-            "*The rank of those three tangent vectors is the whole story. For a **zonal** "
-            "harmonic one of the three rotations does nothing at all — the third singular value "
-            "drops to zero, the stabilizer is the SO(2) of spins about its axis, and the orbit is "
-            "only a 2-sphere. Nudge the tilt slider and the symmetry breaks : the third direction "
-            "comes alive, the orbit fills its three dimensions, and one further invariant is lost "
-            "to orientation. Everything the section above asserts — dim 𝒪 = 3 − dim Stab, "
-            "n_invariants = (2ℓ+1) − dim 𝒪 — is being measured here, not assumed.*")
+            f"| the orbit spans | {int(np.sum(S > 1e-6 * S[0]))} of {d} directions, "
+            f"{100*var[:3].sum():.0f} % of it in the 3 drawn | — |\n"
+            f"| single harmonics it can be turned into | "
+            f"**{', '.join('Y%s' % _SUP(m) for m in hit) if hit else 'none'}** "
+            f"| {'all of them' if len(hit) == d else 'closest miss : %.3f' % np.sort(reach)[len(hit)]} |\n\n"
+            "*The three coloured loops are the whole point. Each is one axis turned through a "
+            "full circle, so each is a one-parameter subgroup drawn where it actually goes. On "
+            "the **zonal** preset the z loop is not a loop at all : it collapses to a single "
+            "dot, because every one of those rotations returns the identical coefficient vector. "
+            "That collapse **is** dim Stab = 1, and the third singular value dropping to zero is "
+            "the same fact in arithmetic. Push the **spin γ** slider on that preset : the route "
+            "never leaves the black dot, and the solid shape never leaves its ghost.*\n\n"
+            "*Set **ℓ = 1** for the picture with nothing hidden : there the orbit is exactly a "
+            "sphere and 2ℓ+1 = 3, so the projection throws nothing away at all. The x and y loops "
+            "are great circles, the z loop is the pole they meet at, and all three harmonics sit "
+            "on the surface — every dipole really is a rotated Y₁⁰. Every degree above that is "
+            "the same story seen through a lossy window ; the percentages on the axes say how "
+            "lossy.*\n\n"
+            "*Nudge the symmetry slider and the collapsed loop opens up : the orbit gains its "
+            "third dimension and one invariant is spent on orientation. Everything the section "
+            "above asserts — dim 𝒪 = 3 − dim Stab, n_inv = (2ℓ+1) − dim 𝒪 — is measured here, "
+            "not assumed.*\n\n"
+            "*Only the harmonics the orbit really passes through are drawn on it. The rest are "
+            "not points of this orbit at all, so putting them in the picture would only invite "
+            "the eye to place them on a surface they are not on — the bar chart gives their "
+            "distance instead. The sectoral preset is the one to try : a yaw of 90°/ℓ carries "
+            "Yℓ^ℓ exactly onto Yℓ^−ℓ, two bars at zero, and the blue z loop visibly runs through "
+            "both diamonds.*")
 
-    pn.bind(update, l.param.value_throttled, preset, tilt.param.value_throttled, watch=True)
-    update(l.value, preset.value, tilt.value)
+        _move(alpha.value, beta.value, gamma.value)
+
+    def _move(al_deg, be_deg, ga_deg):
+        """Only the three angles changed : redraw the marker, the route and the shape."""
+        if not st:
+            return
+        l, a, project = st['l'], st['a'], st['project']
+        al, be, ga = np.radians([al_deg, be_deg, ga_deg])
+        vec = _euler_D(l, al, be, ga) @ a
+        moved = float(np.linalg.norm(vec - a))
+
+        # -- the orbit, with the route walked across it --------------------- #
+        # Always the same four traces, empty ones included : Panel keeps one data
+        # source per trace *by position*, so a trace appearing or vanishing shifts
+        # every index after it and forces the whole figure to re-sync. Fixed count,
+        # and only the arrays that actually changed travel.
+        route = _euler_route(l, a, al, be, ga)
+        extra = []
+        for leg, nm, dash in zip(route, ("spin γ", "tilt β", "yaw α"),
+                                 ('dot', 'solid', 'solid')):
+            P = project(leg) if len(leg) > 1 else np.empty((0, 3))
+            extra.append(go.Scatter3d(x=P[:, 0], y=P[:, 1], z=P[:, 2], mode='lines',
+                                      line=dict(color=AMBER, width=5, dash=dash),
+                                      name=f"the route : {nm}", hoverinfo='skip',
+                                      legendgroup='route', showlegend=(nm == "yaw α")))
+        Pm = project(vec)
+        extra.append(go.Scatter3d(x=Pm[:, 0], y=Pm[:, 1], z=Pm[:, 2], mode='markers',
+                                  marker=dict(size=10, color=AMBER, symbol='circle',
+                                              line=dict(color='black', width=1)),
+                                  name='where those angles land', hoverinfo='skip'))
+        fig = go.Figure(st['traces'] + extra)
+        var = st['var']
+        fig.update_layout(
+            width=660, height=560, uirevision='constant',
+            title=dict(text=st['title'] + "<br><sub>the amber route walks the three sliders, "
+                                          "one angle at a time</sub>", x=.5, font=dict(size=13)),
+            margin=dict(t=70, b=0, l=0, r=0),
+            legend=dict(x=0, y=1, font=dict(size=10), bgcolor='rgba(255,255,255,.7)'),
+            scene=dict(xaxis=dict(title=f"PC1 · {100*var[0]:.0f} %", **_ORB_AX2),
+                       yaxis=dict(title=f"PC2 · {100*var[1]:.0f} %", **_ORB_AX2),
+                       zaxis=dict(title=f"PC3 · {100*var[2]:.0f} %", **_ORB_AX2),
+                       aspectmode='data', camera=dict(eye=dict(x=1.7, y=1.7, z=1.0))))
+        pane_orbit.object = fig
+
+        # -- the shape : the multiplet as a ghost, the rotation solid inside - #
+        f0, f1 = st['Y'] @ a, st['Y'] @ vec
+        scale = max(np.abs(f0).max(), np.abs(f1).max(), 1e-9)
+        # The ghost keeps its true size and the solid is drawn a hair inside it : the
+        # two are the same surface whenever the rotation does nothing, and coincident
+        # geometry would z-fight into speckle. Painting the solid *smaller* also stops
+        # the translucent shell from washing over it when the two shapes differ.
+        shape = go.Figure([
+            _field_surface(f0, scale, 'the multiplet a', dirs=_ORB_DIRS,
+                           color=GREY, opacity=.18),
+            _field_surface(f1, scale, 'this rotation of it', dirs=_ORB_DIRS, grow=.97),
+        ])
+        shape.update_layout(
+            width=520, height=430, uirevision='constant', showlegend=False,
+            title=dict(text=f"α = {al_deg:.0f}°, β = {be_deg:.0f}°, γ = {ga_deg:.0f}°"
+                            f" &nbsp;·&nbsp; ‖D(R)a − a‖ = <b>{moved:.3f}</b><br>"
+                            "<sub>solid = the rotated multiplet · ghost = where it started"
+                            "</sub>", x=.5, font=dict(size=13)),
+            margin=dict(t=68, b=0, l=0, r=0),
+            scene=dict(xaxis=dict(range=[-1.13, 1.13], **_ORB_AX),
+                       yaxis=dict(range=[-1.13, 1.13], **_ORB_AX),
+                       zaxis=dict(range=[-1.13, 1.13], **_ORB_AX),
+                       aspectmode='cube', camera=dict(eye=dict(x=1.6, y=1.6, z=1.0))))
+        pane_field.object = shape
+
+        where.object = (
+            f"**‖D(R)a − a‖ = {moved:.3f}**"
+            + ("  ·  *these angles change nothing at all : the rotation is in the stabilizer*"
+               if moved < _REACH_TOL else
+               "  ·  *same energy, same shape, re-aimed — the orbit is where all of these live*"))
+
+    pn.bind(_rebuild, l.param.value_throttled, preset, sym.param.value_throttled, watch=True)
+    pn.bind(_move, alpha.param.value_throttled, beta.param.value_throttled,
+            gamma.param.value_throttled, watch=True)
+    _rebuild(l.value, preset.value, sym.value)
 
     return pn.Column(
         pn.pane.Markdown("## Orbits, stabilizers, invariants — measured"),
-        pn.Row(l, preset, tilt), pane,
+        pn.Row(l, preset, sym),
+        pn.Row(alpha, beta, gamma),
+        pn.Row(pn.Column(pane_field, where, pane_reach), pane_orbit),
         _formula(r"$$\dim \mathcal{O}_{\mathbf{a}} = 3 - \dim \mathrm{Stab}(\mathbf{a}), "
                  r"\qquad \underbrace{2\ell+1}_{\dim \mathcal{H}_\ell} = "
                  r"n_{\mathrm{inv}} + \dim \mathcal{O}_{\mathbf{a}}$$"),
