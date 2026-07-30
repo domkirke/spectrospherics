@@ -12,6 +12,6 @@ Welcome to `spectrospherics`! The objective of this repository is to interactive
 | *5_invariant_plance.ipynb*      | Using invariant plane decompositions to decompose Wigner-d matrix    | **Empty**                       |
 | *6_peter_weyl.ipynb*            | Peter-Weyl expension                                                 | **Empty**                       |
 | *7_higher_dimensions.ipynb*     | As we're here... And in more than 3 dimensions?                      | **Empty**                       |
-| *A_so3_lie.ipynb*               | Exploring Lie algebra of $SO(3)$ group                               | **OK**                          |
+| *A_so3_lie.ipynb*               | Exploring Lie algebra of  SO(3)  group                               | **OK**                          |
 | *B_wigner_d_matrix.ipynb*       | Going deeper in Wigner d-matrix decomposision                        | **OK, may change**              |
 | *C_tensor_decomposisions.ipynb* | Linking spherical harmonics with tensor decomposision of rotations   | **OK, may change**              |
