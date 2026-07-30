@@ -4,6 +4,7 @@ Welcome to `spectrospherics`! The objective of this repository is to interactive
 
 **It's not finished yet!** Below you will the forecasted architecture, and which notebook is safe to read and which ones are still under construction.
 
+
 | Name                            | Subject                                                              | Status                          |
 | *-----------------------------* | T------------------------------------------------------------------g | *-----------------------------* |
 | *1_3d_issues.ipynb*             | Why is a magintude-phase decomposition not possible in 3 dimensions? | **almost OK (end not checked)** |
@@ -15,3 +16,4 @@ Welcome to `spectrospherics`! The objective of this repository is to interactive
 | *A_so3_lie.ipynb*               | Exploring Lie algebra of  SO(3)  group                               | **OK**                          |
 | *B_wigner_d_matrix.ipynb*       | Going deeper in Wigner d-matrix decomposision                        | **OK, may change**              |
 | *C_tensor_decomposisions.ipynb* | Linking spherical harmonics with tensor decomposision of rotations   | **OK, may change**              |
+
