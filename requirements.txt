@@ -2,3 +2,4 @@
  plotly
  scipy
  panel
+ jupyter
