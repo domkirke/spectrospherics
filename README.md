@@ -4,11 +4,9 @@ Welcome to `spectrospherics`! The objective of this repository is to interactive
 
 **It's not finished yet!** Below you will the forecasted architecture, and which notebook is safe to read and which ones are still under construction.
 
-| Name | Subject | Status |
-| *--* | S-----. | *----* |
-
-| *1_3d_issues.ipynb*             | Why is a magintude-phase decomposition not possible in 3 dimensions? | **almost OK (end not checked)** |
+| Name                            | Subject                                                              | Status                          |
 | *-----------------------------* | T------------------------------------------------------------------g | *-----------------------------* |
+| *1_3d_issues.ipynb*             | Why is a magintude-phase decomposition not possible in 3 dimensions? | **almost OK (end not checked)** |
 | *3_multipole.ipynb*             | Using Maxwell angles to bridge harmonics with multipoles             | **Not finished**                |
 | *4_quaternions.ipynb*           | Using quaternions angles to decompose shape generation with rotation | **Not finished**                |
 | *5_invariant_plance.ipynb*      | Using invariant plane decompositions to decompose Wigner-d matrix    | **Empty**                       |
