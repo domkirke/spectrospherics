@@ -6,7 +6,7 @@ Welcome to `spectrospherics`! The objective of this repository is to interactive
 
 
 | Name                            | Subject                                                              | Status                          |
-| *-----------------------------* | T------------------------------------------------------------------g | *-----------------------------* |
+| :------------------------------ | :------------------------------------------------------------------- | :------------------------------ |
 | *1_3d_issues.ipynb*             | Why is a magintude-phase decomposition not possible in 3 dimensions? | **almost OK (end not checked)** |
 | *3_multipole.ipynb*             | Using Maxwell angles to bridge harmonics with multipoles             | **Not finished**                |
 | *4_quaternions.ipynb*           | Using quaternions angles to decompose shape generation with rotation | **Not finished**                |
