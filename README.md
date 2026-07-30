@@ -4,8 +4,10 @@ Welcome to `spectrospherics`! The objective of this repository is to interactive
 
 **It's not finished yet!** Below you will the forecasted architecture, and which notebook is safe to read and which ones are still under construction.
 
+
 ---------------------------------
 | Name                            | Subject                                                                        | Status                          |
+| *-----------------------------* | S----------------------------------------------------------------------------. | *-----------------------------* |
 | *1_3d_issues.ipynb*             | Why is a magintude-phase decomposition not possible in 3 dimensions?           | **almost OK (end not checked)** |
 | *2_mimicking_polar.ipynb*       | Trying some tricks to imitate polar decomposition in 3 dimensions, and failing | **Complete**                    |
 | *3_multipole.ipynb*             | Using Maxwell angles to bridge harmonics with multipoles                       | **Not finished**                |
