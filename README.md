@@ -7,7 +7,9 @@ Welcome to `spectrospherics`! The objective of this repository is to interactive
 
 | Name                            | Subject                                                              | Status                          |
 | :------------------------------ | :------------------------------------------------------------------- | :------------------------------ |
+| *0_2d_spectrospherics.ipynb*    | Remembering polar decomposition of circular harmonics coefficients?  | **almost OK (end not checked)** |
 | *1_3d_issues.ipynb*             | Why is a magintude-phase decomposition not possible in 3 dimensions? | **almost OK (end not checked)** |
+| *2_mimicking_polar.ipynb*       | Trying to adapt polar decompositions in 3d, and why it fails         | **almost OK (end not checked)** |
 | *3_multipole.ipynb*             | Using Maxwell angles to bridge harmonics with multipoles             | **Not finished**                |
 | *4_quaternions.ipynb*           | Using quaternions angles to decompose shape generation with rotation | **Not finished**                |
 | *5_invariant_plance.ipynb*      | Using invariant plane decompositions to decompose Wigner-d matrix    | **Empty**                       |
