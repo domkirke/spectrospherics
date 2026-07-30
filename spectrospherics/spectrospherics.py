@@ -385,8 +385,8 @@ def _pairwise_polar_transform(params: dict, structural: dict) -> dict:
                 else:
                     c = params[f'c{n}_{m}']
                     phi = params[f'phi{n}_{m}']
-                    new_params[f'c{n}_{m}'] = float(c * np.cos(m * phi))
-                    new_params[f'c{n}_-{m}'] = float(c * np.sin(m * phi))
+                    new_params[f'c{n}_{m}'] = float(c * np.cos(m * 2 * np.pi * phi))
+                    new_params[f'c{n}_-{m}'] = float(c * np.sin(m * 2 *np.pi * phi))
     return new_params
 
 PAIRWISE_POLAR_3D = DecompositionSpec(
@@ -398,7 +398,6 @@ PAIRWISE_POLAR_3D = DecompositionSpec(
 )
 
 
-
 def plot_pairwise_polar_spectrambisonics():
     """Coefficient-by-coefficient explorer for a 3D ambisonic field.
 
@@ -408,6 +407,403 @@ def plot_pairwise_polar_spectrambisonics():
     return DecompositionExplorer(PAIRWISE_POLAR_3D).layout
 
 
+
+def _build_hyperspheric_params(structural):
+    """One row per degree n, carrying its 2n+1 coefficients a_n^m, m = -n..n.
+    Rows stack top -> bottom, so the pyramid reads like the ACN layout."""
+    order = structural["order"]
+    rows = []
+    for n in range(order + 1):
+        if n == 0: 
+            rows.append([
+                ParamSpec(f"r0", rf"$r_0$", value=0., start=0., end=1.)
+            ])
+        else:
+            rows.append(
+                [ParamSpec(f"r{n}", rf"$r_{n}", value=1.0 if n == 1 else 0.0, start=0., end=1.0)] + 
+                [ParamSpec(f"phi{n}_{m}", rf"$\phi_{{{n}}}^{{{m}}}$", value=0.0, start=0, end=1.0) 
+                    for m in range(0, 2*n+1)]
+            )
+    return rows
+
+def _hyperspheric_transform(params: dict, structural: dict) -> dict:
+    order = structural["order"]
+    new_params = {}
+    for n in range(order+1):
+        if n == 0: 
+            new_params['c0_0'] = params['r0']
+        else:
+            r = params[f'r{n}']
+            phis = [params.get(f'phi{n}_{m}') for m in range(2*n+1)]
+            phis = np.clip(np.array([phis[i] * np.pi for i in range(len(phis)-1)] + [phis[-1] * 2 * np.pi]), 1e-7, None)
+            m_label = -n
+            for m in range(2*n+1):
+                new_params[f'c{n}_{m_label}'] = r * np.prod(np.sin(phis[:m])) * np.cos(phis[m])
+                m_label += 1
+    return new_params
+
+HYPERSPHERIC_3D = DecompositionSpec(
+    name = "Pairwse Polar Coefficients (3D)",
+    structural={"order": (1, 5, 3), "fit to frame": True},
+    build_params=_build_hyperspheric_params,
+    transform=_hyperspheric_transform,
+    render=_render_spherical,
+)
+
+
+def plot_hyperspherics_spectrambisonics():
+    """Coefficient-by-coefficient explorer for a 3D ambisonic field.
+
+    Untick *fit to frame* to see gain as well as shape : normalised, a field that
+    is only being scaled -- a₀⁰ moved on its own, say -- is a sphere that never
+    changes."""
+    return DecompositionExplorer(HYPERSPHERIC_3D).layout
+
+
+
+
+
+# --------------------------------------------------------------------------- #
+#  Hyperspheric angle tracking                                                #
+# --------------------------------------------------------------------------- #
+
+from .lie import (BLUE, RED, GREEN, AMBER, PURPLE,
+                                 _arrow, _frame_axes, _scene, _sphere, hat)
+
+# --------------------------------------------------------------------------- #
+#  The chart : hyperangles -> degree-1 coefficients                           #
+# --------------------------------------------------------------------------- #
+
+#: ACN order of a degree-1 block, and the axis each coefficient carries in SN3D.
+ACN_M = (-1, 0, 1)
+ACN_AXIS = ('y', 'z', 'x')
+#: one colour per hyperangle. Blue/red stay reserved for the sign of the field,
+#: as everywhere else in the package, so the knobs take the remaining three.
+ANGLE_COLOR = (GREEN, PURPLE, AMBER)
+
+
+def _m(m):
+    """``-1``, ``0``, ``+1`` -- with a sign only where there is one to show."""
+    return f"{m:+d}" if m else "0"
+
+
+def angle_scales(redundant=True):
+    """Radian span of each normalised slider : ``pi`` except the last one."""
+    return np.array([np.pi, 2 * np.pi] if not redundant else [np.pi, np.pi, 2 * np.pi])
+
+
+def to_radians(s, redundant=True):
+    """Normalised slider values ``[0, 1]`` -> angles, as the explorer scales them."""
+    return np.asarray(s, float)[:len(angle_scales(redundant))] * angle_scales(redundant)
+
+
+def hyper_to_acn1(r, phis):
+    """Degree-1 ACN coefficients ``(a_1^-1, a_1^0, a_1^+1)`` from ``r`` and angles.
+
+    ``len(phis) == 3`` is the explorer's redundant chart (a trailing cosine on the
+    last coefficient), ``len(phis) == 2`` the standard norm-preserving one."""
+    phis = np.asarray(phis, float)
+    c, prod = np.zeros(3), 1.0
+    for k in range(3):
+        c[k] = r * prod * (np.cos(phis[k]) if k < len(phis) else 1.0)
+        if k < len(phis):
+            prod *= np.sin(phis[k])
+    return c
+
+
+def jacobian_acn1(r, phis):
+    """``dc/dphi`` of :func:`hyper_to_acn1`, shape ``(3, len(phis))``.
+
+    Written as an explicit product rather than with ``cot phi_i`` so that it stays
+    exact where a sine vanishes -- which is exactly where the interesting
+    degeneracies are."""
+    phis = np.asarray(phis, float)
+    K = len(phis)
+    Jac = np.zeros((3, K))
+    for k in range(3):
+        tail = np.cos(phis[k]) if k < K else 1.0     # the coefficient's own factor
+        for i in range(K):
+            if i > k:
+                continue                              # phi_i does not appear in c_k
+            if i == k:
+                head = np.prod(np.sin(phis[:k]))
+                Jac[k, i] = -r * head * np.sin(phis[k])
+            else:
+                head = np.prod([np.sin(phis[j]) for j in range(k) if j != i])
+                Jac[k, i] = r * head * np.cos(phis[i]) * tail
+    return Jac
+
+
+def acn1_to_vector(c):
+    """The dipole direction : ACN ``(m=-1, 0, +1)`` is ``(y, z, x)``, so reorder."""
+    c = np.asarray(c, float)
+    return np.array([c[2], c[0], c[1]])
+
+
+def vector_to_acn1(v):
+    """Inverse of :func:`acn1_to_vector`."""
+    v = np.asarray(v, float)
+    return np.array([v[1], v[2], v[0]])
+
+
+def acn1_rotation_block(R3):
+    """Degree-1 real-SH rotation block : the 3x3 with axes permuted to (y, z, x).
+
+    Same object as ``torchspatialaudio.utils.sh_rotation._R1_from_cartesian`` --
+    kept local so this script stands on its own."""
+    p = [1, 2, 0]
+    return np.asarray(R3, float)[np.ix_(p, p)]
+
+
+def rodrigues(axis, angle):
+    """``exp(angle * axis^)`` for a unit ``axis``."""
+    K = hat(np.asarray(axis, float))
+    return np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * (K @ K)
+
+
+# --------------------------------------------------------------------------- #
+#  The incidence of one hyperangle : rotation vs gain                         #
+# --------------------------------------------------------------------------- #
+
+def generators(r, phis):
+    """Per-angle decomposition of ``dv/dphi_k`` into a rotation and a gain.
+
+    Returns one dict per angle with ``velocity``, ``radial`` (the gain rate,
+    ``d|v|/dphi_k``), ``tangential``, ``omega`` (angular velocity), ``rate``
+    (``|omega|``, in radians of field rotation per radian of knob) and ``axis``."""
+    c = hyper_to_acn1(r, phis)
+    v = acn1_to_vector(c)
+    Jv = np.stack([acn1_to_vector(col) for col in jacobian_acn1(r, phis).T], axis=1)
+    rho = np.linalg.norm(v)
+    out = []
+    for k in range(Jv.shape[1]):
+        d = Jv[:, k]
+        if rho < 1e-12:                       # a collapsed field has no direction
+            out.append(dict(velocity=d, radial=0.0, tangential=d * 0,
+                            omega=np.zeros(3), rate=0.0, axis=np.zeros(3)))
+            continue
+        vhat = v / rho
+        radial = float(vhat @ d)
+        omega = np.cross(v, d) / rho ** 2
+        rate = float(np.linalg.norm(omega))
+        out.append(dict(velocity=d, radial=radial, tangential=d - radial * vhat,
+                        omega=omega, rate=rate,
+                        axis=omega / rate if rate > 1e-12 else np.zeros(3)))
+    return out
+
+
+def sweep(r, s, k, redundant=True, n=241):
+    """Sweep the ``k``-th normalised angle over its whole range, others frozen.
+
+    Returns ``(s_k, V, rates, radials)`` : the swept values, the curve ``v(s_k)``
+    the dipole traces, and the two rates along it."""
+    s = list(s)
+    grid = np.linspace(0.0, 1.0, n)
+    V, rates, radials = [], [], []
+    for t in grid:
+        s_t = list(s)
+        s_t[k] = float(t)
+        phis = to_radians(s_t, redundant)
+        V.append(acn1_to_vector(hyper_to_acn1(r, phis)))
+        g = generators(r, phis)[k]
+        rates.append(g['rate'] * angle_scales(redundant)[k])      # per slider unit
+        radials.append(g['radial'] * angle_scales(redundant)[k])
+    return grid, np.asarray(V), np.asarray(rates), np.asarray(radials)
+
+
+def finite_check(r, s, k, redundant=True, delta=1e-4):
+    """Compare the generator against the finite motion of the same knob.
+
+    ``angle/step`` is the angle of the *exact* minimal rotation taking ``v`` to
+    the stepped ``v``, divided by the step -- it must agree with ``rate``.
+    ``gain`` is the norm ratio : anything but 1 means the knob is not a rotation.
+    ``rot_residual`` is how far the pure rotation ``exp(delta * omega^) v`` lands
+    from the true ``v(phi + delta)``, per unit step : it converges to ``|radial|``,
+    i.e. it measures exactly the gain the knob leaks.  ``full_residual`` adds the
+    gain back and must vanish with the step, confirming the split is complete."""
+    phis = to_radians(s, redundant)
+    v0 = acn1_to_vector(hyper_to_acn1(r, phis))
+    step = np.zeros(len(phis))
+    step[k] = delta
+    v1 = acn1_to_vector(hyper_to_acn1(r, phis + step))
+    n0, n1 = np.linalg.norm(v0), np.linalg.norm(v1)
+    g = generators(r, phis)[k]
+    cos = float(np.clip((v0 @ v1) / max(n0 * n1, 1e-15), -1.0, 1.0))
+    turned = (rodrigues(g['axis'], g['rate'] * delta) @ v0) if g['rate'] > 1e-12 else v0
+    gained = turned * (1.0 + delta * g['radial'] / max(n0, 1e-15))
+    return dict(rate=g['rate'], angle_over_step=np.arccos(cos) / delta,
+                gain=n1 / max(n0, 1e-15), radial=g['radial'],
+                rot_residual=float(np.linalg.norm(turned - v1)) / max(delta, 1e-15),
+                full_residual=float(np.linalg.norm(gained - v1)) / max(delta, 1e-15))
+
+
+# --------------------------------------------------------------------------- #
+#  Plotting                                                                    #
+# --------------------------------------------------------------------------- #
+
+_AZ, _ZE = np.mgrid[-np.pi:np.pi:61j, 0:np.pi:31j]
+_DIRS = np.stack([np.sin(_ZE) * np.cos(_AZ),
+                  np.sin(_ZE) * np.sin(_AZ),
+                  np.cos(_ZE)], axis=-1)
+
+
+#: the balloon is drawn at 60% of its true size, so the orbits -- which live on the
+#: sphere of radius |v| -- stay outside it instead of being swallowed by it.
+BALLOON_SCALE = 0.6
+
+
+def _dipole_balloon(v, opacity=0.35):
+    """The degree-1 field itself : ``r = |v . u|``, coloured by the sign of the lobe."""
+    f = _DIRS @ np.asarray(v, float)
+    rad = BALLOON_SCALE * np.abs(f)
+    return go.Surface(x=rad * _DIRS[..., 0], y=rad * _DIRS[..., 1], z=rad * _DIRS[..., 2],
+                      surfacecolor=np.sign(f), cmin=-1, cmax=1, opacity=opacity,
+                      showscale=False, hoverinfo='skip', showlegend=False,
+                      colorscale=[[0, BLUE], [1, RED]])
+
+
+def _axis_line(axis, color, name, scale=1.35):
+    """A rotation axis, drawn through the origin in both directions."""
+    a = np.asarray(axis, float) * scale
+    return go.Scatter3d(x=[-a[0], a[0]], y=[-a[1], a[1]], z=[-a[2], a[2]],
+                        mode='lines', name=name, showlegend=True,
+                        line=dict(width=4, color=color, dash='dash'),
+                        hoverinfo='skip')
+
+
+def figure_incidences(r, s, redundant=True, show_axes=True, show_orbits=True,
+                      tangent_scale=0.25):
+    """The main view : the dipole, and what each hyperangle does to it.
+
+    Solid arrow = the field's pointing vector ``v``.  Coloured arrow = the
+    velocity ``dv/dphi_k`` the knob imprints on it.  Dashed line = the axis of
+    the rotation that velocity amounts to.  Thin curve = the orbit the knob
+    sweeps out on its own."""
+    phis = to_radians(s, redundant)
+    c = hyper_to_acn1(r, phis)
+    v = acn1_to_vector(c)
+    gens = generators(r, phis)
+    scales = angle_scales(redundant)
+
+    # the reference sphere has radius r : an orbit that dips inside it is a knob
+    # that is losing gain rather than rotating.
+    traces = [_sphere(0.05, radius=max(r, 1e-3)), *_frame_axes(1.35), _dipole_balloon(v)]
+    traces += _arrow((0, 0, 0), v, '#333333', 'v (pointing)', width=9)
+
+    for k, g in enumerate(gens):
+        color = ANGLE_COLOR[k]
+        # per slider unit, not per radian : that is the quantity the knob shows
+        rate, radial = g['rate'] * scales[k], g['radial'] * scales[k]
+        tag = f"phi_{k}"
+        if show_orbits:
+            _, V, _, _ = sweep(r, s, k, redundant, n=181)
+            traces.append(go.Scatter3d(x=V[:, 0], y=V[:, 1], z=V[:, 2], mode='lines',
+                                       name=f"orbit of {tag}", legendgroup=tag,
+                                       line=dict(width=3, color=color), hoverinfo='skip'))
+        traces += _arrow(v, tangent_scale * g['velocity'] * scales[k], color,
+                         f"{tag} : {rate:.2f} rad rotation, {radial:+.2f} gain",
+                         width=5)
+        if show_axes and np.linalg.norm(g['axis']) > 0:
+            traces.append(_axis_line(g['axis'], color, f"axis of {tag}"))
+
+    fig = go.Figure(traces)
+    coeff = "  ".join(f"a₁<sup>{_m(m)}</sup>={ci:+.3f}" for m, ci in zip(ACN_M, c))
+    fig.update_layout(
+        title=dict(text=f"degree-1 field : {coeff}   |v| = {np.linalg.norm(v):.3f}",
+                   x=0.5, font=dict(size=13)),
+        autosize=True, height=560, margin=dict(t=42, b=0, l=0, r=0),
+        scene=_scene(1.4), uirevision='constant',
+        legend=dict(x=0, y=1, font=dict(size=10)))
+    return fig
+
+
+def figure_sweeps(r, s, redundant=True, n=241):
+    """Static summary : the orbits, and the rotation / gain rate along each of them.
+
+    The middle panel is where the degeneracies show : the ``phi_1`` rate collapses
+    to zero as ``phi_0`` approaches a pole, and (redundant chart) ``phi_2`` barely
+    rotates anything at all while the bottom panel shows it draining the gain."""
+    scales = angle_scales(redundant)
+    fig = make_subplots(rows=2, cols=2, column_widths=[0.62, 0.38],
+                        specs=[[{"type": "scene", "rowspan": 2}, {"type": "xy"}],
+                               [None, {"type": "xy"}]],
+                        subplot_titles=("orbits of each hyperangle",
+                                        "rotation rate |ω| (rad per slider unit)",
+                                        "gain rate d|v| (per slider unit)"),
+                        vertical_spacing=0.12)
+
+    fig.add_trace(_sphere(0.05, radius=max(r, 1e-3)), row=1, col=1)
+    for tr in _frame_axes(1.3):
+        fig.add_trace(tr, row=1, col=1)
+    v0 = acn1_to_vector(hyper_to_acn1(r, to_radians(s, redundant)))
+    for tr in _arrow((0, 0, 0), v0, '#333333', 'v', width=8):
+        fig.add_trace(tr, row=1, col=1)
+
+    for k in range(len(scales)):
+        color = ANGLE_COLOR[k]
+        grid, V, rates, radials = sweep(r, s, k, redundant, n=n)
+        fig.add_trace(go.Scatter3d(x=V[:, 0], y=V[:, 1], z=V[:, 2], mode='lines',
+                                   name=f"phi_{k}", legendgroup=f"phi_{k}",
+                                   line=dict(width=4, color=color)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=grid, y=rates, mode='lines', name=f"phi_{k}",
+                                 legendgroup=f"phi_{k}", showlegend=False,
+                                 line=dict(color=color)), row=1, col=2)
+        fig.add_trace(go.Scatter(x=grid, y=radials, mode='lines', name=f"phi_{k}",
+                                 legendgroup=f"phi_{k}", showlegend=False,
+                                 line=dict(color=color)), row=2, col=2)
+
+    chart = "redundant (explorer)" if redundant else "proper"
+    fig.update_layout(title=dict(text=f"hyperangle incidences on degree 1 — {chart} chart, "
+                                      f"r = {r:.2f}, s = {tuple(round(x, 2) for x in s)}",
+                                 x=0.5, font=dict(size=13)),
+                      height=620, width=1080, margin=dict(t=70, b=40, l=10, r=10),
+                      scene=_scene(1.4), uirevision='constant',
+                      legend=dict(x=0, y=1, font=dict(size=11)))
+    fig.update_xaxes(title_text="slider value", row=2, col=2)
+    fig.update_yaxes(rangemode='tozero', row=1, col=2)
+    return fig
+
+
+def _build_params(structural):
+    """Row 1 : the radius.  Row 2 : the hyperangles, in normalised slider units."""
+    n_angles = 3 if structural["redundant angle"] else 2
+    return [
+        [ParamSpec("r", r"$r$", value=1.0, start=0.0, end=1.0)],
+        [ParamSpec(f"s{k}", rf"$\phi_{k}$", value=0.5 if k == 0 else 0.0,
+                   start=0.0, end=1.0) for k in range(n_angles)],
+    ]
+
+
+def _transform(params, structural):
+    """Sliders -> the geometry the figure is drawn from (the explorer's own idiom :
+    the knobs the user turns and the quantities plotted need not be the same)."""
+    n_angles = 3 if structural["redundant angle"] else 2
+    return dict(r=params["r"], s=[params[f"s{k}"] for k in range(n_angles)])
+
+
+def _render(geo, structural):
+    return figure_incidences(geo["r"], geo["s"],
+                             redundant=structural["redundant angle"],
+                             show_axes=structural["rotation axes"],
+                             show_orbits=structural["orbits"])
+
+
+HYPERANGLE_DEGREE1 = DecompositionSpec(
+    name="Hyperangle incidences on degree 1",
+    structural={"redundant angle": True, "rotation axes": True, "orbits": True},
+    build_params=_build_params,
+    transform=_transform,
+    render=_render,
+)
+
+
+def plot_hyperangles_degree1():
+    """Interactive view of what each hyperangle does to the degree-1 field.
+
+    Watch the ``phi_1`` arrow shrink to nothing as ``phi_0`` goes to 0 or 1 (the
+    chart's gimbal lock), and untick *redundant angle* to see the third knob --
+    the one that only shrinks the field -- disappear."""
+    return DecompositionExplorer(HYPERANGLE_DEGREE1).layout
 
 
 

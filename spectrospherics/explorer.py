@@ -73,7 +73,8 @@ class ParamController:
             sizing_mode="stretch_width", margin=(2, 8),
         )
         # ``value_throttled`` and not ``value``: one redraw when the drag ends.
-        self.slider.param.watch(lambda _event: self._on_change(), "value_throttled")
+        # self.slider.param.watch(lambda _event: self._on_change(), "value_throttled")
+        self.slider.param.watch(lambda _event: self._on_change(), "value")
 
     @property
     def value(self) -> float:
